@@ -1,29 +1,327 @@
 ---
-title: "Untitled"
-output: html_document
-date: '2022-04-19'
+title: "Virginia 2021 Governor Election Project"
+author: "Aaron Kessler"
+date: "4/19/2022"
+output: 
+  rmdformats::downcute:
+    keep_md: true
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(janitor)
+library(httr)
+library(jsonlite)
+options(scipen = 999)
+options(stringsAsFactors = FALSE)
+
 ```
 
-## R Markdown
+# Getting 2020 Presidential results 
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+Data available here: <https://historical.elections.virginia.gov/elections/view/144567/>
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+A little column cleaning and we'll load in the data file.
 
-```{r cars}
-summary(cars)
+```{r}
+
+prez_2020 <- read_csv("processed_data/va_2020_prez_cleaned.csv")
+
 ```
 
-## Including Plots
+Let's see what we have
 
-You can also embed plots, for example:
+```{r}
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+head(prez_2020)
+
+
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Calculating percentage of the vote
+
+```{r}
+
+prez_2020 %>% 
+  mutate(
+    biden_pct = biden/total_votes_2021_prez
+  )
+
+```
+
+Now let's do some rounding and move that decimal point
+
+```{r}
+
+prez_2020 %>% 
+  mutate(
+    biden_pct = janitor::round_half_up(biden / total_votes_2021_prez * 100, 1)
+  )
+
+```
+
+Now trump too
+
+```{r}
+
+prez_2020 <- prez_2020 %>% 
+  mutate(
+    biden_pct = janitor::round_half_up(biden / total_votes_2021_prez * 100, 2),
+    trump_pct = janitor::round_half_up(trump / total_votes_2021_prez * 100, 2)
+  )
+
+head(prez_2020)
+
+```
+
+# Getting 2021 Virginia governor results 
+
+Data available from the state here: <https://results.elections.virginia.gov/vaelections/2021%20November%20General/Site/Statewide.html>
+
+In JSON format only
+
+```{r}
+#build the url
+url <- "https://results.elections.virginia.gov/vaelections/2021%20November%20General/Json/Governor.json"
+
+get_info <- GET(url)
+
+this.raw.content <- rawToChar(get_info$content)
+this.content <- fromJSON(this.raw.content)
+
+#dataframe from just the 6 content 
+content_df <- as.data.frame(this.content[[6]])
+
+```
+
+Where are candidates themselves? They are "nested" inside. We'll use `unnest()`to expand things.
+
+```{r}
+#unnest
+results <- content_df %>%
+  unnest(cols = Candidates)
+
+head(results)
+
+```
+
+Unnest again on locality
+
+```{r}
+
+results <- results %>%
+  unnest(cols = Locality)
+
+head(results)
+```
+
+Great.
+
+We'll give it a new name to make it easier for us and clean the column names, remove extraneous ones.
+
+```{r}
+
+gov_2021 <- results %>% 
+  clean_names() %>% 
+  select(-precincts_reporting,
+         -precincts_participating,
+         -last_modified,
+         -ballot_order)
+
+head(gov_2021)
+
+```
+
+What's the issue we may have here?
+
+This is actually tidy data which is good - but for comparing the candidates we'd want them on the same row.
+
+## Reshaping
+
+Enter pivot_wider().
+
+We'll get rid of everything we don't need first.
+
+```{r}
+
+gov_2021 <- gov_2021 %>% 
+  filter(ballot_name %in% c("Glenn A. Youngkin", "Terry R. McAuliffe")) %>% 
+  select(-locality_code,
+         -political_party)
+  
+gov_2021
+
+```
+
+Now we'll do the spreading out to reshape.
+
+```{r}
+
+gov_2021_wide <- gov_2021 %>% 
+  pivot_wider(names_from = ballot_name, values_from = c(votes, percentage))
+
+gov_2021_wide
+
+```
+
+Nice.
+
+This is giving us some pretty long column names. we can change them after the fact using `rename()`. But first let's clean the names to make it easier.
+
+```{r}
+
+gov_2021_wide <- gov_2021_wide %>% 
+  clean_names()
+
+head(gov_2021_wide)
+```
+
+Now let's rename, and we'll use similar names to what we had earlier in our 2021 results.
+
+```{r}
+
+gov_2021_wide <- gov_2021_wide %>% 
+  rename(
+    youngkin = votes_glenn_a_youngkin,
+    mcauliffe = votes_terry_r_mc_auliffe,
+    pct_youngkin = percentage_glenn_a_youngkin,
+    pct_mcauliffe = percentage_terry_r_mc_auliffe
+  )
+
+head(gov_2021_wide)
+
+```
+
+Bingo.
+
+There's still one potential issue here. Can you see it?
+
+The percentage columns are actually text values, not numbers. And they have that `%` sign in the text too. Let's fix that using a handy function from the readr package, `parse_number()`.
+
+```{r}
+
+gov_2021_wide <- gov_2021_wide %>% 
+  mutate(
+    pct_youngkin = readr::parse_number(pct_youngkin),
+    pct_mcauliffe = readr::parse_number(pct_mcauliffe)
+  )
+
+head(gov_2021_wide)
+```
+
+Perfect. Problem solved.
+
+# Putting things together - joining 
+
+Now we want to actually join things up.
+
+Can we do that? Let's check out our two tables
+
+```{r}
+
+gov_2021_wide
+
+```
+
+```{r}
+
+prez_2020
+
+```
+
+Few quick things to deal with... first let's get rid of the total votes in 2021, we don't need that anymore. But also the locality isn't the same case as in our governor's results, so let's uppercase it.
+
+```{r}
+
+prez_2020 <- prez_2020 %>% 
+  mutate(
+    locality = str_to_upper(locality)
+  ) %>% 
+  select(-total_votes_2021_prez)
+
+prez_2020
+
+```
+
+Great. Now we're all ready to join. Or are we?
+
+Look closely at the record counts for our two tables. It looks like the presidential results has an extra record perhaps? Let's investigate.
+
+We can use `anti_join()` to see what's in one table but not the other.
+
+```{r}
+
+anti_join(prez_2020, gov_2021_wide, by = c("locality" = "locality_name"))
+
+```
+
+There's a total row in there! Well we don't want that. Let's take it out.
+
+Also though notice a second county didn't match...want to be that might be because it's differently worded? Let's see by doing the anti-join in reverse now.
+
+```{r}
+
+anti_join(gov_2021_wide, prez_2020, by = c("locality_name" = "locality"))
+
+```
+
+Yep that's it. So let's fix both of those things in the prez table.
+
+```{r}
+
+prez_2020 <- prez_2020 %>% 
+  filter(locality != "TOTALS") %>% 
+  mutate(
+    locality = str_replace(locality, "KING AND QUEEN", "KING & QUEEN")
+  )
+
+
+```
+
+Now we're ready. Let's join.
+
+```{r}
+
+inner_join(prez_2020, gov_2021_wide, by = c("locality" = "locality_name"))
+
+```
+
+Alright! It worked.
+
+## Comparing gov vs. prez results
+
+Now that things are join, let's actually go ahead and start making columns to compare the two elections and how the candidates did this time compared with last time.
+
+Where should we go from here....?
+
+```{r}
+
+
+
+```
+
+```{r}
+
+
+
+```
+
+```{r}
+
+
+
+```
+
+```{r}
+
+
+
+```
+
+```{r}
+
+
+
+```
