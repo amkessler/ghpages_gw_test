@@ -3,8 +3,7 @@ title: "Virginia 2021 Governor Election Project"
 author: "Aaron Kessler"
 date: "4/19/2022"
 output: 
-  rmdformats::downcute:
-    keep_md: true
+  rmdformats::downcute
 ---
 
 ```{r setup, include=FALSE}
